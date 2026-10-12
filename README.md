@@ -178,8 +178,8 @@ The health endpoint reports MongoDB and Redis connection state.
 In development, the backend automatically creates this admin account when it does not already exist:
 
 ```text
-Email:    nikhileshkumar317@gmail.com
-Password: test1234
+Email:    shashank.kotra200609@gmail.com
+Password: Shashank9
 ```
 
 You can override the seeded account with `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `ADMIN_NAME` in `backend/.env`.
