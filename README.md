@@ -214,11 +214,3 @@ npm run build
 ```
 
 This builds the Vite frontend.
-
-## Troubleshooting
-
-See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for the common local MongoDB/Redis/SMTP issues and the expected startup logs.
-
-## License
-
-No license file is currently included.
