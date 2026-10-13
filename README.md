@@ -30,7 +30,6 @@ PulseStream is a topic-based pub/sub notification engine. Users subscribe to pro
 | Email | Nodemailer + SMTP |
 | Auth | JWT + bcrypt |
 
-Everything in this version is JavaScript. There are no `.ts` or `.tsx` source files.
 
 ## Architecture
 
