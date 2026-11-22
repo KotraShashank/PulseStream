@@ -1,24 +1,66 @@
-name: Resolve audited dependency versions
+name: PulseStream checks
 on:
+  pull_request:
   push:
     branches: ["fix/**"]
 permissions:
   contents: read
 jobs:
-  resolve:
+  verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+      mail:
+        image: axllent/mailpit:v1.27.4
+        ports: ["1025:1025", "8025:8025"]
+        env:
+          MP_SMTP_AUTH_ACCEPT_ANY: "1"
+          MP_SMTP_AUTH_ALLOW_INSECURE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
-      - name: Resolve updated lockfiles
+      - run: npm ci --prefix backend
+      - run: npm ci --prefix frontend
+      - run: npm run build
+        env:
+          VITE_API_URL: http://127.0.0.1:15090
+      - run: npm test
+      - name: Install browser test driver
+        run: npm install --prefix "$RUNNER_TEMP/pulse-browser" --ignore-scripts --no-audit --no-fund playwright-core@1.56.1
+      - name: Exercise the API, live alert, queue workers and SMTP recovery
+        env:
+          NODE_ENV: production
+          PORT: "15090"
+          MONGODB_URI: mongodb://127.0.0.1:27017/pulsestream_ci
+          REDIS_URL: redis://127.0.0.1:6379
+          FRONTEND_URL: http://127.0.0.1:5173
+          SEED_ADMIN: "true"
+          ADMIN_EMAIL: admin@example.test
+          SMTP_HOST: 127.0.0.1
+          SMTP_PORT: "1025"
+          SMTP_USER: robot@example.test
+          SMTP_PASS: local-mail-sink
         run: |
-          npm install --prefix backend --package-lock-only --ignore-scripts --no-fund --no-audit 'nodemailer@^10.6.1'
-          npm audit fix --prefix backend --omit=dev --package-lock-only --ignore-scripts --no-fund || true
-          npm audit fix --prefix frontend --omit=dev --package-lock-only --ignore-scripts --no-fund || true
-          for path in backend/package.json backend/package-lock.json frontend/package.json frontend/package-lock.json; do
-            printf 'PULSE_BEGIN %s\n' "$path"
-            gzip -nc "$path" | base64 --wrap=120 | sed 's/^/PULSE_DATA /'
-            printf 'PULSE_END %s\n' "$path"
-          done
+          export JWT_SECRET="$(openssl rand -hex 32)"
+          export ADMIN_PASSWORD="$(openssl rand -hex 24)"
+          node backend/src/server.js &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          node backend/test/service-smoke.cjs
+          npm --prefix frontend run preview -- --host 127.0.0.1 --port 5173 --strictPort &
+          preview_pid=$!
+          trap 'kill "$preview_pid" "$server_pid" 2>/dev/null || true' EXIT
+          curl --fail --retry 10 --retry-all-errors --retry-delay 1 http://127.0.0.1:5173/ --output /dev/null
+          NODE_PATH="$RUNNER_TEMP/pulse-browser/node_modules" CHROME_BIN="$(command -v google-chrome)" node frontend/test/browser.cjs
+      - name: Audit backend production dependencies
+        run: npm audit --prefix backend --omit=dev --audit-level=high
+      - name: Audit frontend production dependencies
+        run: npm audit --prefix frontend --omit=dev --audit-level=high
