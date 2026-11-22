@@ -5,6 +5,7 @@ const UserSchema = new Schema(
   {
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    sessionVersion: { type: Number, default: 0 },
     password: { type: String, required: false, select: false },
     avatar: { type: String, default: "👤" },
     resetPasswordToken: { type: String, select: false },

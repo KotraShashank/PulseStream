@@ -28,6 +28,7 @@ const validateEmail = (value) => {
 
 const validatePassword = (value) => {
   const password = String(value || "");
+  if (new TextEncoder().encode(password).length > 72) return "Password must be 72 bytes or fewer";
   if (password.length < 8) return "Password must be at least 8 characters long";
   if (!/[A-Z]/.test(password))
     return "Password must contain at least one uppercase letter";
@@ -186,20 +187,8 @@ export const AuthPanel = ({ setCurrentUser }) => {
     setLoading(true);
 
     try {
-      const response = await forgotPassword(normalizedEmail);
-      const devResetToken = response.data?.devResetToken;
-
-      if (devResetToken) {
-        setResetToken(devResetToken);
-        setSuccessMsg(
-          "SMTP is not configured locally. A development reset code was auto-filled below.",
-        );
-      } else {
-        setSuccessMsg(
-          "If an account exists, a recovery code was sent to your email.",
-        );
-      }
-
+      await forgotPassword(normalizedEmail);
+      setSuccessMsg("If an account exists, a recovery code was sent to your email.");
       setView("reset");
     } catch (err) {
       setError(err.response?.data?.error || "Failed to send reset email.");
@@ -242,6 +231,7 @@ export const AuthPanel = ({ setCurrentUser }) => {
   };
 
   const switchAuthView = (nextView) => {
+    if (loading) return;
     setView(nextView);
     setError("");
     setSuccessMsg("");
@@ -253,7 +243,7 @@ export const AuthPanel = ({ setCurrentUser }) => {
   };
 
   return (
-    <div className="max-w-md mx-auto bg-white p-8 rounded-2xl shadow-xl border border-slate-200/70 mt-10 animate-fadeIn">
+    <div className="max-w-md mx-auto bg-white p-6 sm:p-9 rounded-2xl shadow-lg shadow-slate-200/60 border border-slate-200/70 animate-fadeIn">
       <h2 className="text-2xl font-black text-slate-800 text-center flex items-center justify-center">
         {view === "signup" && (
           <UserPlus className="mr-2 h-6 w-6 text-violet-600" />
@@ -274,11 +264,11 @@ export const AuthPanel = ({ setCurrentUser }) => {
           ? "Enter your email to receive a secure recovery code."
           : view === "reset"
             ? "Enter the recovery code and create a strong new password."
-            : "Secure MERN authentication with bcrypt password hashing"}
+            : "Track products and choose how to receive price-drop alerts."}
       </p>
 
       {error && (
-        <div className="mb-4 p-3 bg-rose-50 text-rose-600 text-xs rounded-lg border border-rose-200 font-bold text-center animate-shake">
+        <div role="alert" className="mb-4 p-3 bg-rose-50 text-rose-600 text-xs rounded-lg border border-rose-200 font-bold text-center animate-shake">
           <div className="flex items-center justify-center gap-2">
             <AlertTriangle className="h-4 w-4" />
             <span>{error}</span>
@@ -287,7 +277,7 @@ export const AuthPanel = ({ setCurrentUser }) => {
       )}
 
       {successMsg && (
-        <div className="mb-4 p-3 bg-emerald-50 text-emerald-700 text-xs rounded-lg border border-emerald-200 font-bold text-center">
+        <div role="status" className="mb-4 p-3 bg-emerald-50 text-emerald-700 text-xs rounded-lg border border-emerald-200 font-bold text-center">
           {successMsg}
         </div>
       )}
@@ -295,10 +285,11 @@ export const AuthPanel = ({ setCurrentUser }) => {
       {view === "forgot" && (
         <form onSubmit={handleForgotPassword} className="space-y-4">
           <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase">
+            <label htmlFor="auth-email" className="block text-xs font-bold text-slate-700 uppercase">
               Email Address
             </label>
             <input
+              id="auth-email"
               type="email"
               required
               autoComplete="email"
@@ -321,10 +312,11 @@ export const AuthPanel = ({ setCurrentUser }) => {
       {view === "reset" && (
         <form onSubmit={handleResetPassword} className="space-y-4">
           <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase">
+            <label htmlFor="auth-code" className="block text-xs font-bold text-slate-700 uppercase">
               Recovery Code
             </label>
             <input
+              id="auth-code"
               type="text"
               required
               value={resetToken}
@@ -335,11 +327,12 @@ export const AuthPanel = ({ setCurrentUser }) => {
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase">
+            <label htmlFor="auth-new-password" className="block text-xs font-bold text-slate-700 uppercase">
               New Password
             </label>
             <div className="relative mt-1">
               <input
+                id="auth-new-password"
                 type={showResetPassword ? "text" : "password"}
                 required
                 autoComplete="new-password"
@@ -380,26 +373,29 @@ export const AuthPanel = ({ setCurrentUser }) => {
         <form onSubmit={handleAuth} className="space-y-4">
           {view === "signup" && (
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase">
+              <label htmlFor="auth-name" className="block text-xs font-bold text-slate-700 uppercase">
                 Full Name
               </label>
               <input
+                id="auth-name"
                 type="text"
                 required
                 autoComplete="name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 className="w-full mt-1 px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none"
-                placeholder="John Doe"
+                placeholder="Your name"
+                maxLength={100}
               />
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-bold text-slate-700 uppercase">
+            <label htmlFor="auth-email" className="block text-xs font-bold text-slate-700 uppercase">
               Email Address
             </label>
             <input
+              id="auth-email"
               type="email"
               required
               autoComplete="email"
@@ -417,12 +413,13 @@ export const AuthPanel = ({ setCurrentUser }) => {
 
           <div>
             <div className="flex justify-between items-center">
-              <label className="block text-xs font-bold text-slate-700 uppercase">
+              <label htmlFor="auth-password" className="block text-xs font-bold text-slate-700 uppercase">
                 Password
               </label>
               {view === "login" && (
                 <button
                   type="button"
+                  disabled={loading}
                   onClick={() => switchAuthView("forgot")}
                   className="text-[10px] text-violet-600 hover:underline font-bold"
                 >
@@ -432,6 +429,7 @@ export const AuthPanel = ({ setCurrentUser }) => {
             </div>
             <div className="relative mt-1">
               <input
+                id="auth-password"
                 type={showPassword ? "text" : "password"}
                 required
                 autoComplete={
@@ -462,11 +460,12 @@ export const AuthPanel = ({ setCurrentUser }) => {
 
           {view === "signup" && (
             <div>
-              <label className="block text-xs font-bold text-slate-700 uppercase">
+              <label htmlFor="auth-confirm-password" className="block text-xs font-bold text-slate-700 uppercase">
                 Confirm Password
               </label>
               <div className="relative mt-1">
                 <input
+                  id="auth-confirm-password"
                   type={showConfirmPassword ? "text" : "password"}
                   required
                   autoComplete="new-password"
@@ -521,7 +520,8 @@ export const AuthPanel = ({ setCurrentUser }) => {
         {view === "forgot" || view === "reset" ? (
           <button
             type="button"
-            onClick={() => switchAuthView("login")}
+            disabled={loading}
+                  onClick={() => switchAuthView("login")}
             className="text-xs text-slate-500 font-bold hover:text-slate-800 flex items-center justify-center"
           >
             <ArrowLeft className="h-3 w-3 mr-1" />
@@ -530,6 +530,7 @@ export const AuthPanel = ({ setCurrentUser }) => {
         ) : (
           <button
             type="button"
+            disabled={loading}
             onClick={() =>
               switchAuthView(view === "signup" ? "login" : "signup")
             }

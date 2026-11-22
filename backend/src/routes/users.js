@@ -3,6 +3,7 @@ const { Types } = require("mongoose");
 const User = require("../models/User");
 const { Follow } = require("../models/Follow");
 const {
+  isAdminEmail,
   requireAuth,
   requireAdmin,
   requireSelfOrAdmin,
@@ -21,16 +22,20 @@ function formatSubscriptions(follows) {
 // GET /api/users - Admin-only observability endpoint.
 router.get("/", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const users = await User.find().lean();
-    const usersWithFollows = await Promise.all(
-      users.map(async (user) => {
-        const follows = await Follow.find({ userId: user._id }).lean();
-        return { ...user, subscriptions: formatSubscriptions(follows) };
-      }),
-    );
+    const users = await User.find().select("name email avatar").lean();
+    const follows = await Follow.find({ userId: { $in: users.map(user => user._id) } }).lean();
+    const byUser = new Map();
+    for (const follow of follows) {
+      const key = String(follow.userId);
+      if (!byUser.has(key)) byUser.set(key, []);
+      byUser.get(key).push(follow);
+    }
+    const usersWithFollows = users.map(user => ({
+      ...user, subscriptions: formatSubscriptions(byUser.get(String(user._id)) || []),
+    }));
     res.json(usersWithFollows);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: "Unable to update or load subscriptions" });
   }
 });
 
@@ -47,7 +52,7 @@ router.patch(
       if (!Types.ObjectId.isValid(userId)) {
         return res.status(400).json({ error: "Invalid userId" });
       }
-      if (!productId || !["inApp", "email"].includes(channel)) {
+      if (typeof productId !== "string" || !productId.trim() || productId.length > 128 || !["inApp", "email"].includes(channel)) {
         return res.status(400).json({
           error:
             'productId and channel must be provided; channel must be "inApp" or "email"',
@@ -56,42 +61,37 @@ router.patch(
 
       const targetUserId = new Types.ObjectId(userId);
       const targetTopicId = String(productId).trim();
-      let follow = await Follow.findOne({
-        userId: targetUserId,
-        topicId: targetTopicId,
-      });
+      const user = await User.findById(targetUserId).select("name email avatar").lean();
+      if (!user) return res.status(404).json({ error: "User not found" });
 
-      if (!follow) {
-        follow = new Follow({
-          userId: targetUserId,
-          topicId: targetTopicId,
-          channels: [channel],
-        });
-      } else if (follow.channels.includes(channel)) {
-        follow.channels = follow.channels.filter((item) => item !== channel);
-      } else {
-        follow.channels.push(channel);
+      const filter = { userId: targetUserId, topicId: targetTopicId };
+      const enabled = req.body.enabled;
+      if (enabled !== undefined && typeof enabled !== "boolean") {
+        return res.status(400).json({ error: "enabled must be a boolean" });
       }
-
-      if (follow.channels.length === 0) {
-        await Follow.deleteOne({ _id: follow._id });
-      } else {
-        await follow.save();
+      const channels = { $ifNull: ["$channels", []] };
+      const add = { $setUnion: [channels, [channel]] };
+      const remove = { $setDifference: [channels, [channel]] };
+      const next = enabled === undefined
+        ? { $cond: [{ $in: [channel, channels] }, remove, add] }
+        : enabled ? add : remove;
+      const change = [{ $set: { channels: next } }];
+      try {
+        await Follow.updateOne(filter, change, { upsert: true, updatePipeline: true });
+      } catch (err) {
+        if (err.code !== 11000) throw err;
+        await Follow.updateOne(filter, change, { updatePipeline: true });
       }
-
-      const user = await User.findById(targetUserId).lean();
-      if (!user) {
-        return res.status(404).json({ error: "User not found" });
-      }
+      await Follow.deleteOne({ ...filter, channels: { $size: 0 } });
 
       const updatedFollows = await Follow.find({ userId: targetUserId }).lean();
       res.json({
         success: true,
-        data: { ...user, subscriptions: formatSubscriptions(updatedFollows) },
+        data: { ...user, isAdmin: isAdminEmail(user.email), subscriptions: formatSubscriptions(updatedFollows) },
       });
     } catch (error) {
       console.error("🚨 [BACKEND] Watchlist DB Update Failed:", error);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: "Unable to update or load subscriptions" });
     }
   },
 );
@@ -113,28 +113,27 @@ router.post("/:userId/arm-all", requireAuth, requireAdmin, async (req, res) => {
     }
 
     const targetUserId = new Types.ObjectId(userId);
-    const cleanProductIds = [
-      ...new Set(productIds.map((id) => String(id).trim()).filter(Boolean)),
-    ];
-
-    await Follow.deleteMany({ userId: targetUserId });
-
-    const followsToInsert = cleanProductIds.map((topicId) => ({
-      userId: targetUserId,
-      topicId,
-      channels: ["inApp", "email"],
-    }));
-
-    await Follow.insertMany(followsToInsert);
-
-    const user = await User.findById(targetUserId).lean();
+    if (productIds.length > 100 || productIds.some(id => typeof id !== "string" || !id.trim() || id.length > 128)) {
+      return res.status(400).json({ error: "Provide up to 100 valid product IDs" });
+    }
+    const user = await User.findById(targetUserId).select("name email avatar").lean();
     if (!user) return res.status(404).json({ error: "User not found" });
+    const ids = [...new Set(productIds.map(id => id.trim()))];
+    await Follow.bulkWrite(ids.map(topicId => ({
+      updateOne: {
+        filter: { userId: targetUserId, topicId },
+        update: { $set: { channels: ["inApp", "email"] } },
+        upsert: true,
+      },
+    })));
+    const follows = await Follow.find({ userId: targetUserId }).lean();
 
     res.json({
       success: true,
       data: {
         ...user,
-        subscriptions: formatSubscriptions(followsToInsert),
+        isAdmin: isAdminEmail(user.email),
+        subscriptions: formatSubscriptions(follows),
       },
     });
   } catch (error) {
@@ -142,7 +141,7 @@ router.post("/:userId/arm-all", requireAuth, requireAdmin, async (req, res) => {
       "🚨 [BACKEND] Failed to enable all notification subscriptions:",
       error,
     );
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: "Unable to update or load subscriptions" });
   }
 });
 

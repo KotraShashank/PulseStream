@@ -1,0 +1,53 @@
+name: PulseStream checks
+on:
+  pull_request:
+  push:
+    branches: ["fix/**"]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+      mail:
+        image: axllent/mailpit:v1.27.4
+        ports: ["1025:1025", "8025:8025"]
+        env:
+          MP_SMTP_AUTH_ACCEPT_ANY: "1"
+          MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci --prefix backend
+      - run: npm ci --prefix frontend
+      - run: npm run build
+      - run: npm test
+      - name: Exercise the API, live alert, queue workers and SMTP recovery
+        env:
+          NODE_ENV: production
+          PORT: "15090"
+          MONGODB_URI: mongodb://127.0.0.1:27017/pulsestream_ci
+          REDIS_URL: redis://127.0.0.1:6379
+          FRONTEND_URL: http://localhost:5173
+          SEED_ADMIN: "true"
+          ADMIN_EMAIL: admin@example.test
+          SMTP_HOST: 127.0.0.1
+          SMTP_PORT: "1025"
+          SMTP_USER: robot@example.test
+          SMTP_PASS: local-mail-sink
+        run: |
+          export JWT_SECRET="$(openssl rand -hex 32)"
+          export ADMIN_PASSWORD="$(openssl rand -hex 24)"
+          node backend/src/server.js &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          node backend/test/service-smoke.cjs

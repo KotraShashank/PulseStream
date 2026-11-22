@@ -27,6 +27,7 @@ router.delete(
   async (req, res) => {
     try {
       await Notification.deleteMany({ userId: req.params.userId });
+      require("../config/socket").getIO().to(req.params.userId).emit("inbox:reset");
       res.status(200).json({ success: true, message: "Inbox cleared successfully!" });
     } catch (error) {
       res.status(500).json({ success: false, error: "Failed to clear inbox" });

@@ -29,6 +29,7 @@ function getRedisConnectionOptions(name, { worker = false } = {}) {
   return {
     host: redisHost,
     port: redisPort,
+    db: Number(redisUrl.pathname.slice(1) || 0),
 
     ...(redisUsername ? { username: redisUsername } : {}),
     ...(redisPassword ? { password: redisPassword } : {}),
@@ -83,6 +84,10 @@ redisHealthConnection.on("reconnecting", (delay) => {
 });
 
 async function verifyRedis() {
+  if (redisHealthConnection.status !== "ready") {
+    const { once } = require("node:events");
+    await once(redisHealthConnection, "ready", { signal: AbortSignal.timeout(30000) });
+  }
   const response = await redisHealthConnection.ping();
 
   if (response !== "PONG") {

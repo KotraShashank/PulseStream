@@ -2,14 +2,14 @@ const { Event } = require("../models/Event");
 const { Follow } = require("../models/Follow");
 const { Notification } = require("../models/Notification");
 const { Topic } = require("../models/Topic");
-const { fanoutQueue } = require("../queues/fanout.queue");
+const { dispatchPending } = require("../queues/event-dispatch");
 
 // 1. TRIGGER EVENT (The missing link for the Dashboard Analytics!)
 const triggerEvent = async (req, res) => {
   try {
     const { topicId, type, payload } = req.body;
 
-    if (!topicId || !type || !payload) {
+    if (typeof topicId !== "string" || !topicId.trim() || topicId.length > 128 || typeof type !== "string" || !type.trim() || type.length > 128 || !payload || typeof payload !== "object" || Array.isArray(payload)) {
       res
         .status(400)
         .json({ error: "topicId, type, and payload are required" });
@@ -33,31 +33,19 @@ const triggerEvent = async (req, res) => {
       topicId: safeTopicId,
       type,
       payload,
+      publishPending: true,
     });
-
-    console.log(`✅ Official Event Created in DB with ID: ${newEvent._id}`);
-
-    // Without this, the workers have no idea what to attach their success/fail logs to.
-    await fanoutQueue.add("process-event", {
-      eventId: newEvent._id, // <--- THIS IS THE MAGIC KEY FOR THE DASHBOARD
-      topicId: safeTopicId,
-      type: newEvent.type,
-      payload: newEvent.payload,
-    });
-
-    console.log(
-      `📦 [BullMQ]: Job pushed to 'fanout-queue' for Event ID ${newEvent._id}`,
-    );
+    void dispatchPending();
 
     res.status(201).json({
       success: true,
-      message: "Event accepted and queued for background processing!",
+      message: "Event accepted for background processing",
       subscriberCount,
       event: newEvent,
     });
   } catch (error) {
     console.error("🚨 Failed to trigger event:", error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "Request could not be completed" });
   }
 };
 
@@ -71,7 +59,7 @@ const getNotifications = async (req, res) => {
 
     res.status(200).json({ success: true, data: notifications });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "Request could not be completed" });
   }
 };
 
@@ -86,7 +74,7 @@ const followTopic = async (req, res) => {
         .json({ error: "You can only manage your own subscriptions" });
     }
 
-    if (!userId || !topicId || !channels || !Array.isArray(channels)) {
+    if (!userId || typeof topicId !== "string" || !topicId.trim() || topicId.length > 128 || !channels || !Array.isArray(channels)) {
       res.status(400).json({
         error: "userId, topicId, and an array of channels are required",
       });
@@ -102,11 +90,11 @@ const followTopic = async (req, res) => {
         .json({ error: 'channels must contain "email" and/or "inApp"' });
     }
     const follow = await Follow.findOneAndUpdate(
-      { userId, topicId: String(topicId) },
+      { userId, topicId: String(topicId).trim() },
       { channels: safeChannels },
       {
         upsert: true,
-        returnDocument: true,
+        returnDocument: "after",
         runValidators: true,
         setDefaultsOnInsert: true,
       },
@@ -114,7 +102,7 @@ const followTopic = async (req, res) => {
 
     res.status(200).json({ success: true, data: follow });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "Request could not be completed" });
   }
 };
 
@@ -136,7 +124,7 @@ const unfollowTopic = async (req, res) => {
 
     res.status(200).json({ success: true, message: "Unfollowed successfully" });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: "Request could not be completed" });
   }
 };
 
@@ -159,7 +147,7 @@ const createTopic = async (req, res) => {
       res.status(400).json({ error: "A topic with this name already exists" });
       return;
     }
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: "Request could not be completed" });
   }
 };
 

@@ -1,9 +1,14 @@
-const { Worker } = require("bullmq");
+const { Worker, UnrecoverableError } = require("bullmq");
 const { getRedisConnectionOptions } = require("../config/redis");
 const { sendEmail } = require("../config/mail");
 const User = require("../models/User");
 const { Delivery } = require("../models/Delivery");
 const { emitMetricsUpdate } = require("../config/socket");
+
+function escapeHtml(value) {
+  const entities = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  return String(value).replace(/[&<>"']/g, char => entities[char]);
+}
 
 const emailWorker = new Worker(
   "email-queue",
@@ -13,6 +18,7 @@ const emailWorker = new Worker(
       `📧 Email Worker: Picking up job ${job.id} (attempt ${job.attemptsMade + 1}) for User ID ${userId}`,
     );
 
+    if (eventId && await Delivery.exists({ eventId, userId, channel: "email", status: "success" })) return;
     const user = await User.findById(userId);
 
     // Deleted/orphaned user
@@ -35,8 +41,9 @@ const emailWorker = new Worker(
       return;
     }
 
-    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-      const error = new Error(
+    const simulate = process.env.NODE_ENV !== "production" && process.env.LOAD_TEST_MODE === "true";
+    if (!simulate && (!process.env.SMTP_USER || !process.env.SMTP_PASS)) {
+      const error = new UnrecoverableError(
         "SMTP_USER and SMTP_PASS are required for email delivery",
       );
       if (eventId) {
@@ -64,8 +71,8 @@ const emailWorker = new Worker(
     }
 
     const productName = payload?.productName || "Your Watched Item";
-    const oldPrice = payload?.oldPrice || "N/A";
-    const newPrice = payload?.newPrice || "N/A";
+    const oldPrice = payload?.oldPrice ?? "N/A";
+    const newPrice = payload?.newPrice ?? "N/A";
 
     const html = `
 <!DOCTYPE html>
@@ -83,16 +90,16 @@ const emailWorker = new Worker(
     </div>
     <div style="padding: 40px 32px;">
       <p style="font-size: 16px; color: #475569; margin-top: 0;">
-        Hello <strong style="color: #0f172a;">${user.name}</strong>,
+        Hello <strong style="color: #0f172a;">${escapeHtml(user.name)}</strong>,
       </p>
       <p style="font-size: 16px; color: #475569; line-height: 1.5;">
         This is an automated notification that an item on your PulseStream watchlist has recorded a price change.
       </p>
       <div style="margin: 32px 0; border: 1px solid #e2e8f0; border-radius: 8px; padding: 24px; background-color: #f8fafc; border-left: 4px solid #4f46e5;">
-        <h2 style="margin: 0 0 12px 0; font-size: 20px; color: #0f172a;">${productName}</h2>
+        <h2 style="margin: 0 0 12px 0; font-size: 20px; color: #0f172a;">${escapeHtml(productName)}</h2>
         <div style="display: block; margin-top: 8px;">
-          <span style="font-size: 28px; font-weight: 800; color: #10b981;">$${newPrice}</span>
-          <span style="font-size: 16px; color: #94a3b8; text-decoration: line-through; margin-left: 12px;">$${oldPrice}</span>
+          <span style="font-size: 28px; font-weight: 800; color: #10b981;">$${escapeHtml(newPrice)}</span>
+          <span style="font-size: 16px; color: #94a3b8; text-decoration: line-through; margin-left: 12px;">$${escapeHtml(oldPrice)}</span>
         </div>
       </div>
       <p style="font-size: 14px; color: #64748b;">
@@ -117,7 +124,7 @@ const emailWorker = new Worker(
     try {
       const cleanSubject =
         subject || `Watchlist Update: New price recorded for ${productName}`;
-      if (process.env.LOAD_TEST_MODE === "true") {
+      if (simulate) {
         console.log(
           `🧪 [LOAD TEST] Simulating email delivery to ${user.email}`,
         );
@@ -132,12 +139,12 @@ const emailWorker = new Worker(
             {
               status: "success",
               sentAt: new Date(),
-              errorMessage: undefined,
-              faultType: undefined,
+              $unset: { errorMessage: 1, faultType: 1 },
             },
           );
         }
 
+        emitMetricsUpdate();
         return;
       }
       await sendEmail(user.email, cleanSubject, html);
@@ -149,8 +156,7 @@ const emailWorker = new Worker(
           {
             status: "success",
             sentAt: new Date(),
-            errorMessage: undefined,
-            faultType: undefined,
+            $unset: { errorMessage: 1, faultType: 1 },
           },
         );
         emitMetricsUpdate();
@@ -163,7 +169,7 @@ const emailWorker = new Worker(
         await Delivery.findOneAndUpdate(
           { eventId, userId: user._id, channel: "email" },
           {
-            status: "failed",
+            status: job.attemptsMade + 1 >= (job.opts.attempts || 1) ? "failed" : "pending",
             attempts: job.attemptsMade + 1,
             errorMessage: error.message,
             faultType: "SMTP_DELIVERY_ERROR",
@@ -178,6 +184,7 @@ const emailWorker = new Worker(
   {
     connection: getRedisConnectionOptions("email-worker", { worker: true }),
     concurrency: 5,
+    autorun: false,
   },
 );
 

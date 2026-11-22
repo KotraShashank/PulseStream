@@ -3,11 +3,9 @@ const path = require("path");
 
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
-// Safe local development default. Production deployments should always set a
-// strong JWT_SECRET explicitly.
-if (!process.env.JWT_SECRET && process.env.NODE_ENV !== "production") {
-  process.env.JWT_SECRET = "pulsestream-local-development-secret-change-me";
-  console.warn("⚠️ JWT_SECRET not set; using the local development default.");
+if (!process.env.JWT_SECRET) {
+  if (process.env.NODE_ENV === "production") throw new Error("Set JWT_SECRET before starting PulseStream");
+  process.env.JWT_SECRET = require("node:crypto").randomBytes(32).toString("hex");
 }
 
 const express = require("express");
@@ -32,31 +30,14 @@ const User = require("./models/User");
 const analyticsRoutes = require("./routes/analytics.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const { initializeSocket } = require("./config/socket");
-const { isAdminEmail } = require("./middleware/auth");
 const { Follow } = require("./models/Follow");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
-const configuredFrontendUrl = String(
-  process.env.FRONTEND_URL || "http://localhost:5173",
-)
-  .trim()
-  .replace(/\/+$/, "");
-const allowedOrigins = [configuredFrontendUrl, "http://localhost:5173"].filter(
-  Boolean,
-);
-
-const isAllowedOrigin = (origin) => {
-  if (!origin) return true;
-  if (allowedOrigins.includes(origin)) return true;
-  return (
-    process.env.NODE_ENV !== "production" &&
-    /^https?:\/\/localhost(?::\d+)?$/.test(origin)
-  );
-};
+const { isAllowedOrigin } = require("./config/origin");
 
 const httpServer = http.createServer(app);
-initializeSocket(httpServer);
+const io = initializeSocket(httpServer);
 
 app.use(
   cors({
@@ -69,7 +50,16 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json({ limit: "1mb" }));
+app.disable("x-powered-by");
+app.use(express.json({ limit: "64kb" }));
+app.use((req, res, next) => {
+  if (["POST", "PATCH", "PUT"].includes(req.method) && req.body != null &&
+      (Array.isArray(req.body) || typeof req.body !== "object")) {
+    return res.status(400).json({ error: "Expected a JSON object" });
+  }
+  req.body ??= {};
+  next();
+});
 
 app.get("/health", (req, res) => {
   const mongoReady = mongoose.connection.readyState === 1;
@@ -88,15 +78,20 @@ app.get("/health", (req, res) => {
   });
 });
 
+app.use("/api/catalog", require("./routes/catalog"));
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api", notificationRoutes);
 app.use("/api/analytics", analyticsRoutes);
+if (process.env.NODE_ENV !== "production") {
+  app.get("/test-client", (req, res) => res.sendFile(path.resolve(__dirname, "../test-client.html")));
+}
 
 app.use((err, req, res, next) => {
-  console.error("Unhandled API error:", err);
+  console.error("Unhandled API error:", err.name, err.code || err.status || 500);
   if (res.headersSent) return next(err);
-  res.status(500).json({ success: false, error: "Internal server error" });
+  const status = err.status === 413 ? 413 : err.status === 400 ? 400 : 500;
+  res.status(status).json({ success: false, error: status === 413 ? "Request is too large" : status === 400 ? "Invalid JSON" : "Internal server error" });
 });
 
 const DEMO_PRODUCT_IDS = ["prod_1", "prod_2", "prod_3", "prod_4", "prod_5"];
@@ -158,6 +153,7 @@ const seedDevelopmentAdmin = async () => {
 
   const masterName = process.env.ADMIN_NAME || "PulseStream Admin";
 
+  if (!masterPassword && process.env.SEED_ADMIN !== "true") return;
   if (!masterEmail) {
     throw new Error("ADMIN_EMAIL must be set in backend/.env");
   }
@@ -168,7 +164,7 @@ const seedDevelopmentAdmin = async () => {
 
   let admin = await User.findOne({ email: masterEmail });
   if (admin) {
-    console.log(`✅ Admin account verified: ${masterEmail}`);
+    return;
   } else {
     const hashedPassword = await bcrypt.hash(masterPassword, 10);
     admin = await User.create({
@@ -188,6 +184,14 @@ const startServer = async () => {
     await connectDB();
     await verifyRedis();
     await seedDevelopmentAdmin();
+    await require("./models/Event").Event.init();
+    for (const worker of [fanoutWorker, inAppWorker, emailWorker]) {
+      worker.run().catch(error => {
+        console.error("Worker stopped:", worker.name, error.name);
+        process.exit(1);
+      });
+    }
+    require("./queues/event-dispatch").startDispatcher();
 
     httpServer.listen(PORT, () => {
       console.log(`🚀 Server & WebSockets running on http://localhost:${PORT}`);
@@ -200,21 +204,25 @@ const startServer = async () => {
 
 startServer();
 
-const gracefulShutdown = async (signal) => {
-  console.log(`\n🛑 ${signal}: shutting down PulseStream safely...`);
-
+let stopping = false;
+const gracefulShutdown = async () => {
+  if (stopping) return;
+  stopping = true;
+  const deadline = setTimeout(() => process.exit(1), 25000);
+  deadline.unref();
   try {
+    await new Promise(resolve => io.close(resolve));
+    await Promise.all([fanoutWorker.close(), emailWorker.close(), inAppWorker.close()]);
     await Promise.all([
-      fanoutWorker.close(),
-      emailWorker.close(),
-      inAppWorker.close(),
+      require("./queues/fanout.queue").fanoutQueue.close(),
+      require("./queues/email.queue").emailQueue.close(),
+      require("./queues/inapp.queue").inAppQueue.close(),
     ]);
-    await Promise.allSettled([mongoose.connection.close(), closeRedis()]);
-  } finally {
-    httpServer.close(() => {
-      console.log("✅ Server, workers, MongoDB and Redis closed cleanly.");
-      process.exit(0);
-    });
+    await Promise.all([mongoose.connection.close(), closeRedis()]);
+    process.exit(0);
+  } catch (error) {
+    console.error("Shutdown failed:", error.name);
+    process.exit(1);
   }
 };
 

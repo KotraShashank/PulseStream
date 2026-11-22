@@ -84,7 +84,7 @@ PulseStream-js/
 │   ├── .env.example
 │   └── package.json
 ├── package.json
-└── TROUBLESHOOTING.md
+
 ```
 
 ## Requirements
@@ -174,14 +174,7 @@ The health endpoint reports MongoDB and Redis connection state.
 
 ## Development admin account
 
-In development, the backend automatically creates this admin account when it does not already exist:
-
-```text
-Email:    shashank.kotra200609@gmail.com
-Password: Shashank9
-```
-
-You can override the seeded account with `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `ADMIN_NAME` in `backend/.env`.
+Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in the local backend environment to seed an administrator. Optionally set `ADMIN_NAME`. Without these values the app starts with ordinary signup enabled. Production seeding requires `SEED_ADMIN=true`.
 
 The frontend does not hard-code the administrator's email. The backend includes an `isAdmin` flag in the authenticated user response, and protected admin routes enforce authorization server-side.
 
@@ -190,7 +183,7 @@ The frontend does not hard-code the administrator's email. The backend includes 
 1. Start MongoDB and Redis (or configure Upstash Redis).
 2. Run `npm run dev`.
 3. Open the Shopper Portal and sign in with the development admin account. The development admin is automatically subscribed to all five demo products with both channels on a fresh demo database.
-4. You can still use `ARM ALL TRIGGERS` to restore all five subscriptions manually.
+4. You can still use `Enable all alerts` to restore all five subscriptions manually.
 5. Open `Admin Center`.
 6. Click `-$50 (Drop)` for that same product.
 7. Watch the BullMQ workers process the event.

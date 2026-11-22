@@ -1,0 +1,42 @@
+module.exports = [
+  {
+    id: "prod_1",
+    name: "PlayStation 5 Pro",
+    category: "Gaming Console",
+    price: 699,
+    oldPrice: 699,
+    inStock: true,
+  },
+  {
+    id: "prod_2",
+    name: "NVIDIA RTX 5090 GPU",
+    category: "PC Hardware",
+    price: 1999,
+    oldPrice: 1999,
+    inStock: false,
+  },
+  {
+    id: "prod_3",
+    name: "MacBook Pro M4 Max",
+    category: "Laptops",
+    price: 3499,
+    oldPrice: 3499,
+    inStock: true,
+  },
+  {
+    id: "prod_4",
+    name: "Steam Deck OLED 1TB",
+    category: "Handheld Gaming",
+    price: 649,
+    oldPrice: 649,
+    inStock: true,
+  },
+  {
+    id: "prod_5",
+    name: 'LG 32" 4K OLED Monitor',
+    category: "Displays",
+    price: 1199,
+    oldPrice: 1199,
+    inStock: true,
+  },
+];

@@ -45,52 +45,18 @@ const fanoutWorker = new Worker(
         continue;
       }
 
-      // Email delivery
-      if (follower.channels.includes("email")) {
-        await Delivery.findOneAndUpdate(
-          { eventId, userId: follower.userId, channel: "email" },
-          {
-            $set: {
-              status: "pending",
-              sentAt: null,
-              errorMessage: undefined,
-              faultType: undefined,
-            },
-            $setOnInsert: { attempts: 0 },
-          },
-          { upsert: true, returnDocument: true, setDefaultsOnInsert: true },
-        );
-
-        const emailJobId = `delivery-${eventId}-${follower.userId}-email`;
-        await emailQueue.add(
-          "send-email",
-          { eventId, userId: follower.userId, type, payload },
-          { jobId: emailJobId },
-        );
-      }
-
-      // In-App delivery
-      if (follower.channels.includes("inApp")) {
-        await Delivery.findOneAndUpdate(
-          { eventId, userId: follower.userId, channel: "inApp" },
-          {
-            $set: {
-              status: "pending",
-              sentAt: null,
-              errorMessage: undefined,
-              faultType: undefined,
-            },
-            $setOnInsert: { attempts: 0 },
-          },
-          { upsert: true, returnDocument: true, setDefaultsOnInsert: true },
-        );
-
-        const inAppJobId = `delivery-${eventId}-${follower.userId}-inapp`;
-        await inAppQueue.add(
-          "send-inapp",
-          { eventId, userId: follower.userId, type, payload },
-          { jobId: inAppJobId },
-        );
+      for (const channel of new Set(follower.channels)) {
+        if (channel !== "email" && channel !== "inApp") continue;
+        const key = { eventId, userId: follower.userId, channel };
+        const delivery = await Delivery.findOneAndUpdate(key, {
+          $setOnInsert: { ...key, status: "pending", attempts: 0 },
+        }, { upsert: true, returnDocument: "after" });
+        if (delivery.status !== "pending") continue;
+        const email = channel === "email";
+        const queue = email ? emailQueue : inAppQueue;
+        await queue.add(email ? "send-email" : "send-inapp", {
+          eventId, userId: follower.userId, type, payload,
+        }, { jobId: `delivery-${eventId}-${follower.userId}-${email ? "email" : "inapp"}` });
       }
     }
 
@@ -100,6 +66,7 @@ const fanoutWorker = new Worker(
   },
   {
     connection: getRedisConnectionOptions("fanout-worker", { worker: true }),
+    autorun: false,
   },
 );
 

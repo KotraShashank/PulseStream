@@ -1,12 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   fetchMetrics,
   fetchFailures,
   retryDelivery,
-  triggerTestEvent,
+  changeProduct,
   resetMetrics,
 } from "../services/api";
-import { INITIAL_CATALOG } from "../data/catalog";
 import {
   RefreshCw,
   CheckCircle2,
@@ -19,7 +18,7 @@ import {
   Gauge,
 } from "lucide-react";
 
-export const AdminDashboard = () => {
+export const AdminDashboard = ({ catalog, socket }) => {
   const [metrics, setMetrics] = useState({
     totalProcessed: 0,
     successful: 0,
@@ -29,7 +28,9 @@ export const AdminDashboard = () => {
   });
   const [resetting, setResetting] = useState(false);
   const [failures, setFailures] = useState([]);
-  const [products, setProducts] = useState(INITIAL_CATALOG);
+  const { products } = catalog;
+  const requestId = useRef(0);
+  const [hasMetrics, setHasMetrics] = useState(false);
   const [loading, setLoading] = useState(false);
   const [retryingId, setRetryingId] = useState(null);
   const [updatingId, setUpdatingId] = useState(null);
@@ -38,7 +39,8 @@ export const AdminDashboard = () => {
     (item) => item.actionable !== false,
   ).length;
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
+    const request = ++requestId.current;
     setLoading(true);
     try {
       const [metricsRes, failuresRes] = await Promise.all([
@@ -46,6 +48,8 @@ export const AdminDashboard = () => {
         fetchFailures(),
       ]);
 
+      if (request !== requestId.current) return;
+      setHasMetrics(true);
       setMetrics(
         metricsRes.data || {
           totalProcessed: 0,
@@ -59,41 +63,39 @@ export const AdminDashboard = () => {
       setFailures(Array.isArray(failuresRes.data) ? failuresRes.data : []);
       setErrorMsg("");
     } catch (err) {
-      console.error("Error fetching admin data:", err);
+      if (request !== requestId.current) return;
       setErrorMsg(
         err.response?.data?.error ||
           err.message ||
           "Could not reach the backend. Is the server running?",
       );
     } finally {
-      setLoading(false);
+      if (request === requestId.current) setLoading(false);
     }
-  };
-
-  // Initial load
-  // NO setInterval here. Socket.io drives subsequent updates.
-  useEffect(() => {
-    loadData();
-
-    const handleRealtimeMetrics = () => loadData();
-    window.addEventListener(
-      "pulsestream:metrics-update",
-      handleRealtimeMetrics,
-    );
-
-    return () => {
-      window.removeEventListener(
-        "pulsestream:metrics-update",
-        handleRealtimeMetrics,
-      );
-    };
   }, []);
+
+  useEffect(() => {
+    void loadData();
+    let timer;
+    const schedule = () => {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; void loadData(); }, 400);
+    };
+    socket?.on("metrics:update", schedule);
+    socket?.on("connect", schedule);
+    return () => {
+      clearTimeout(timer);
+      requestId.current++;
+      socket?.off("metrics:update", schedule);
+      socket?.off("connect", schedule);
+    };
+  }, [socket, loadData]);
 
   const handleResetMetrics = async () => {
     const confirmed = window.confirm(
       "Reset all PulseStream metrics?\n\n" +
-        "This will permanently delete all events, deliveries, and in-app notifications and clear pending BullMQ jobs.\n\n" +
-        "Users and subscriptions will NOT be deleted.",
+        "This will permanently delete notification events, deliveries, and in-app notifications and clear pending BullMQ jobs.\n\n" +
+        "Inventory, users and subscriptions are preserved.",
     );
 
     if (!confirmed) return;
@@ -102,22 +104,7 @@ export const AdminDashboard = () => {
     setErrorMsg("");
 
     try {
-      const response = await resetMetrics();
-      console.log("✅ Metrics reset successfully:", response.data);
-
-      setMetrics({
-        totalProcessed: 0,
-        successful: 0,
-        failed: 0,
-        pending: 0,
-        successRate: 100,
-      });
-      setFailures([]);
-
-      // Clear notification state elsewhere in the app.
-      window.dispatchEvent(new Event("pulsestream:metrics-reset"));
-
-      // Confirm state from MongoDB.
+      await resetMetrics();
       await loadData();
     } catch (err) {
       console.error("❌ Failed to reset metrics:", err);
@@ -129,59 +116,26 @@ export const AdminDashboard = () => {
     }
   };
 
-  const handlePriceChange = async (productId, delta) => {
-    const product = products.find((p) => p.id === productId);
-    if (!product) return;
-
-    setUpdatingId(productId);
+  const saveProduct = async (product, patch) => {
+    if (updatingId) return;
+    setUpdatingId(product.id);
     try {
-      const newPrice = Math.max(99, product.price + delta);
-      const isPriceDrop = newPrice < product.price;
-
-      setProducts((prev) =>
-        prev.map((p) =>
-          p.id === productId ? { ...p, oldPrice: p.price, price: newPrice } : p,
-        ),
-      );
-
-      if (isPriceDrop) {
-        await triggerTestEvent({
-          topicId: product.id,
-          type: "price_drop",
-          payload: {
-            productId: product.id,
-            productName: product.name,
-            oldPrice: product.price,
-            newPrice,
-            currency: "USD",
-          },
-        });
-        // NO setTimeout(loadData). Fanout / In-App / Email workers will emit "metrics:update" through Socket.io.
-      }
+      const { data } = await changeProduct(product.id, { version: product.version, ...patch });
+      catalog.applyProduct(data);
       setErrorMsg("");
     } catch (err) {
-      console.error("Failed to trigger automated alert:", err);
-      setErrorMsg(
-        err.response?.data?.error ||
-          err.message ||
-          "Failed to trigger the price-drop event — check the backend logs.",
-      );
+      setErrorMsg(err.response?.data?.error || "Inventory could not be updated. Please try again.");
+      await catalog.reload();
     } finally {
       setUpdatingId(null);
     }
-  };
-
-  const handleToggleStock = (productId) => {
-    setProducts((prev) =>
-      prev.map((p) => (p.id === productId ? { ...p, inStock: !p.inStock } : p)),
-    );
   };
 
   const handleRetryJob = async (id) => {
     setRetryingId(id);
     try {
       await retryDelivery(id);
-      setErrorMsg("");
+      await loadData();
     } catch (err) {
       console.error("Failed to retry job:", err);
       setErrorMsg(
@@ -200,7 +154,7 @@ export const AdminDashboard = () => {
   return (
     <div className="space-y-6 animate-fadeIn">
       {errorMsg && (
-        <div className="flex items-start bg-rose-50 border border-rose-200 text-rose-700 text-sm font-semibold px-4 py-3 rounded-2xl animate-shake">
+        <div role="alert" className="flex items-start bg-rose-50 border border-rose-200 text-rose-700 text-sm font-semibold px-4 py-3 rounded-2xl animate-shake">
           <AlertTriangle className="h-4 w-4 mr-2 mt-0.5 shrink-0" />
           <span>{errorMsg}</span>
         </div>
@@ -210,13 +164,13 @@ export const AdminDashboard = () => {
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 bg-white p-6 rounded-2xl shadow-sm border border-slate-200/70">
         <div>
           <h1 className="text-xl font-extrabold text-slate-900">
-            Inventory &amp; Flight Recorder
+            Delivery dashboard
           </h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Price changes below push real events through BullMQ workers.
+            Manage inventory and monitor notification delivery.
           </p>
         </div>
-        <div className="flex gap-2 shrink-0">
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={loadData}
             disabled={loading}
@@ -250,7 +204,7 @@ export const AdminDashboard = () => {
             <Gauge className="h-4 w-4 text-slate-300" />
           </div>
           <div className="text-3xl font-black text-slate-900 mt-2">
-            {metrics.totalProcessed}
+            {hasMetrics ? metrics.totalProcessed : "—"}
           </div>
         </div>
 
@@ -262,7 +216,7 @@ export const AdminDashboard = () => {
             <CheckCircle2 className="h-4 w-4 text-emerald-400" />
           </div>
           <div className="text-3xl font-black text-emerald-600 mt-2">
-            {metrics.successful}
+            {hasMetrics ? metrics.successful : "—"}
           </div>
         </div>
 
@@ -276,7 +230,7 @@ export const AdminDashboard = () => {
             />
           </div>
           <div className="text-3xl font-black text-rose-600 mt-2">
-            {metrics.failed}
+            {hasMetrics ? metrics.failed : "—"}
           </div>
         </div>
 
@@ -287,7 +241,7 @@ export const AdminDashboard = () => {
             </span>
           </div>
           <div className="text-3xl font-black text-violet-600 mt-2">
-            {metrics.successRate}%
+            {hasMetrics ? `${metrics.successRate}%` : "—"}
           </div>
         </div>
       </div>
@@ -322,7 +276,8 @@ export const AdminDashboard = () => {
                     {product.category}
                   </span>
                   <button
-                    onClick={() => handleToggleStock(product.id)}
+                    disabled={Boolean(updatingId)}
+                    onClick={() => saveProduct(product, { inStock: !product.inStock })}
                     className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full flex items-center transition-colors ${product.inStock ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}
                   >
                     {product.inStock ? (
@@ -349,16 +304,16 @@ export const AdminDashboard = () => {
               </div>
               <div className="mt-5 pt-4 border-t border-slate-100 flex gap-2">
                 <button
-                  onClick={() => handlePriceChange(product.id, -50)}
-                  disabled={updatingId === product.id}
+                  onClick={() => saveProduct(product, { price: Math.max(99, product.price - 50) })}
+                  disabled={Boolean(updatingId) || product.price <= 99}
                   className="flex-1 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold py-2 rounded-xl text-xs flex items-center justify-center transition-all active:scale-95 disabled:opacity-50"
                 >
                   <TrendingDown className="h-3.5 w-3.5 mr-1" />
                   -$50
                 </button>
                 <button
-                  onClick={() => handlePriceChange(product.id, 50)}
-                  disabled={updatingId === product.id}
+                  onClick={() => saveProduct(product, { price: product.price + 50 })}
+                  disabled={Boolean(updatingId)}
                   className="flex-1 bg-slate-50 hover:bg-slate-100 text-slate-700 font-semibold py-2 rounded-xl text-xs flex items-center justify-center transition-all active:scale-95 disabled:opacity-50"
                 >
                   <TrendingUp className="h-3.5 w-3.5 mr-1" />
@@ -399,7 +354,7 @@ export const AdminDashboard = () => {
                     colSpan={5}
                     className="py-10 text-center text-slate-400 font-medium"
                   >
-                    All clear — no failed deliveries.
+                    {hasMetrics ? "No failed deliveries." : loading ? "Loading delivery records…" : "Delivery records unavailable."}
                   </td>
                 </tr>
               ) : (
@@ -440,7 +395,7 @@ export const AdminDashboard = () => {
                       {item.actionable !== false ? (
                         <button
                           onClick={() => handleRetryJob(item._id)}
-                          disabled={retryingId === item._id}
+                          disabled={Boolean(retryingId)}
                           className="inline-flex items-center px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition-all disabled:opacity-50"
                         >
                           <RefreshCw

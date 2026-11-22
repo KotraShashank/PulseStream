@@ -11,28 +11,26 @@ function getJwtSecret() {
   return secret;
 }
 
-const requireAuth = (req, res, next) => {
-  const header = req.headers.authorization;
-  if (!header || !header.startsWith("Bearer ")) {
-    return res.status(401).json({ success: false, error: "No token provided" });
-  }
-
+async function findSession(token) {
+  let decoded;
   try {
-    const token = header.slice("Bearer ".length).trim();
-    if (!token) {
-      return res
-        .status(401)
-        .json({ success: false, error: "No token provided" });
-    }
-
-    const decoded = jwt.verify(token, getJwtSecret());
-    req.userId = String(decoded.id);
-    next();
+    decoded = jwt.verify(token, getJwtSecret(), { algorithms: ["HS256"] });
   } catch {
-    return res
-      .status(401)
-      .json({ success: false, error: "Invalid or expired token" });
+    return null;
   }
+  if (typeof decoded.id !== "string" || !/^[a-f0-9]{24}$/i.test(decoded.id)) return null;
+  const user = await User.findById(decoded.id).select("email sessionVersion").lean();
+  if (!user || (user.sessionVersion || 0) !== (decoded.version ?? 0)) return null;
+  return { id: decoded.id, email: user.email, expiresAt: decoded.exp * 1000 };
+}
+
+const requireAuth = async (req, res, next) => {
+  const token = req.headers.authorization?.match(/^Bearer\s+(\S+)$/i)?.[1];
+  const session = token && await findSession(token);
+  if (!session) return res.status(401).json({ success: false, error: "Sign in to continue" });
+  req.userId = session.id;
+  req.session = session;
+  next();
 };
 
 // Keep admin emails configurable so the demo account is not hard-wired into
@@ -56,38 +54,19 @@ const isAdminEmail = (email) =>
       .toLowerCase(),
   );
 
-const requireAdmin = async (req, res, next) => {
-  try {
-    const caller = await User.findById(req.userId).select("email");
-    if (!caller || !isAdminEmail(caller.email)) {
-      return res
-        .status(403)
-        .json({ success: false, error: "Admin access only" });
-    }
-    next();
-  } catch (error) {
-    next(error);
-  }
+const requireAdmin = (req, res, next) => {
+  if (isAdminEmail(req.session.email)) return next();
+  return res.status(403).json({ success: false, error: "Admin access only" });
 };
 
-const requireSelfOrAdmin =
-  (paramName = "id") =>
-  async (req, res, next) => {
-    try {
-      if (String(req.params[paramName]) === String(req.userId)) return next();
-
-      const caller = await User.findById(req.userId).select("email");
-      if (!caller || !isAdminEmail(caller.email)) {
-        return res.status(403).json({ success: false, error: "Forbidden" });
-      }
-      next();
-    } catch (error) {
-      next(error);
-    }
-  };
+const requireSelfOrAdmin = (paramName = "id") => (req, res, next) => {
+  if (req.params[paramName] === req.userId || isAdminEmail(req.session.email)) return next();
+  return res.status(403).json({ success: false, error: "Forbidden" });
+};
 
 module.exports = {
   requireAuth,
+  findSession,
   requireAdmin,
   requireSelfOrAdmin,
   getJwtSecret,
