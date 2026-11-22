@@ -1,6 +1,6 @@
 const { Worker, UnrecoverableError } = require("bullmq");
 const { getRedisConnectionOptions } = require("../config/redis");
-const { sendEmail } = require("../config/mail");
+const { isMailConfigured, sendEmail } = require("../config/mail");
 const User = require("../models/User");
 const { Delivery } = require("../models/Delivery");
 const { emitMetricsUpdate } = require("../config/socket");
@@ -42,9 +42,9 @@ const emailWorker = new Worker(
     }
 
     const simulate = process.env.NODE_ENV !== "production" && process.env.LOAD_TEST_MODE === "true";
-    if (!simulate && (!process.env.SMTP_USER || !process.env.SMTP_PASS)) {
+    if (!simulate && !isMailConfigured()) {
       const error = new UnrecoverableError(
-        "SMTP_USER and SMTP_PASS are required for email delivery",
+        "Email delivery is not configured",
       );
       if (eventId) {
         await Delivery.findOneAndUpdate(
@@ -54,7 +54,7 @@ const emailWorker = new Worker(
             $set: {
               status: "failed",
               errorMessage: error.message,
-              faultType: "SMTP_NOT_CONFIGURED",
+              faultType: "EMAIL_NOT_CONFIGURED",
             },
           },
         );
@@ -126,7 +126,7 @@ const emailWorker = new Worker(
         subject || `Watchlist Update: New price recorded for ${productName}`;
       if (simulate) {
         console.log(
-          `🧪 [LOAD TEST] Simulating email delivery to ${user.email}`,
+          `[LOAD TEST] Simulating email job ${job.id}`,
         );
 
         if (eventId) {
@@ -147,8 +147,7 @@ const emailWorker = new Worker(
         emitMetricsUpdate();
         return;
       }
-      await sendEmail(user.email, cleanSubject, html);
-      console.log(`📧 Email sent to ${user.email}`);
+      await sendEmail(user.email, cleanSubject, html, `watchlist/${job.id}`);
 
       if (eventId) {
         await Delivery.findOneAndUpdate(
@@ -162,9 +161,9 @@ const emailWorker = new Worker(
         emitMetricsUpdate();
       }
 
-      console.log(`✅ Email Worker: Delivered to ${user.email}`);
+      console.log(`Email provider accepted job ${job.id}`);
     } catch (error) {
-      console.error(`❌ Email Worker Failed for ${user.email}:`, error.message);
+      console.error(`Email job ${job.id} failed:`, error.code || error.name);
       if (eventId) {
         await Delivery.findOneAndUpdate(
           { eventId, userId: user._id, channel: "email" },
@@ -172,7 +171,7 @@ const emailWorker = new Worker(
             status: job.attemptsMade + 1 >= (job.opts.attempts || 1) ? "failed" : "pending",
             attempts: job.attemptsMade + 1,
             errorMessage: error.message,
-            faultType: "SMTP_DELIVERY_ERROR",
+            faultType: "EMAIL_DELIVERY_ERROR",
           },
         );
         emitMetricsUpdate();

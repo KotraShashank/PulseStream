@@ -14,6 +14,7 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
 const { connectDB } = require("./config/db");
+const { isMailConfigured } = require("./config/mail");
 const {
   redisHealthConnection,
   verifyRedis,
@@ -71,10 +72,7 @@ app.get("/health", (req, res) => {
     service: "PulseStream Server",
     mongo: mongoReady ? "connected" : mongoose.connection.readyState,
     redis: redisReady ? "connected" : redisHealthConnection.status,
-    email:
-      process.env.SMTP_USER && process.env.SMTP_PASS
-        ? "configured"
-        : "not-configured",
+    email: isMailConfigured() ? "configured" : "not-configured",
   });
 });
 

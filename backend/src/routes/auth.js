@@ -10,7 +10,7 @@ const {
   getJWTSecret,
   isAdminEmail,
 } = require("../middleware/auth");
-const { sendEmail } = require("../config/mail");
+const { isMailConfigured, sendEmail } = require("../config/mail");
 
 const router = Router();
 const { limitAuth } = require("../middleware/auth-limit");
@@ -234,7 +234,7 @@ router.post("/forgot-password", limitAuth(4), async (req, res) => {
         .json({ success: false, error: "Please enter a valid email address" });
     }
 
-    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    if (!isMailConfigured()) {
       return res.status(503).json({ success: false, error: "Email recovery is temporarily unavailable." });
     }
     const user = await User.findOne({ email });

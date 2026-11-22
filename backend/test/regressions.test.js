@@ -11,7 +11,7 @@ function replaceModule(path, exports) {
   require.cache[id] = { id, filename: id, loaded: true, exports };
 }
 replaceModule("../src/config/redis", { redisHealthConnection: { eval: async () => 1 } });
-replaceModule("../src/config/mail", { sendEmail: assert.fail });
+replaceModule("../src/config/mail", { isMailConfigured: () => false, sendEmail: assert.fail });
 const updates = [];
 replaceModule("../src/config/socket", { getIO: () => ({ emit: (...args) => updates.push(args) }) });
 const queue = { add: async () => {} };

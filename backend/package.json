@@ -4,7 +4,7 @@
   "description": "",
   "main": "src/server.js",
   "scripts": {
-    "test": "node --test test/regressions.test.js",
+    "test": "node --test test/regressions.test.js test/mail.test.js",
     "dev": "nodemon src/server.js",
     "start": "node src/server.js"
   },
