@@ -1,6 +1,5 @@
 import { useState } from "react";
-import { INITIAL_CATALOG } from "../data/catalog";
-import { enableAllNotifications } from "../services/api";
+import { enableAllNotifications, updateWatchlist } from "../services/api";
 import {
   Mail,
   Zap,
@@ -9,14 +8,17 @@ import {
   LogOut,
   AlertTriangle,
 } from "lucide-react";
-import { AuthPanel } from "./AuthPanel";
+
 
 export const UserPanel = ({
   currentUser,
   setCurrentUser,
-  onToggleWatchlist,
+  catalog,
 }) => {
   const [error, setError] = useState("");
+
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
 
   const getSubStatus = (productId) => {
     if (!currentUser || !Array.isArray(currentUser.subscriptions)) {
@@ -29,50 +31,27 @@ export const UserPanel = ({
   };
 
   const handleToggle = async (productId, channel) => {
-    if (!currentUser) return;
-
-    const previousUser = currentUser;
-    const existingSubscriptions = Array.isArray(currentUser.subscriptions)
-      ? currentUser.subscriptions
-      : [];
-
-    const updatedSubscriptions = existingSubscriptions.map((subscription) =>
-      subscription.productId === productId
-        ? { ...subscription, [channel]: !subscription[channel] }
-        : subscription,
-    );
-
-    const exists = updatedSubscriptions.some(
-      (subscription) => subscription.productId === productId,
-    );
-
-    // Create a new subscription if this product doesn't exist yet.
-    if (!exists) {
-      updatedSubscriptions.push({
-        productId,
-        inApp: channel === "inApp",
-        email: channel === "email",
-      });
-    }
-
-    // Optimistic UI update.
-    setCurrentUser({ ...currentUser, subscriptions: updatedSubscriptions });
-
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
     try {
-      await onToggleWatchlist(productId, channel);
-      setError("");
+      const enabled = !getSubStatus(productId)[channel];
+      const { data } = await updateWatchlist(currentUser._id, productId, channel, enabled);
+      setCurrentUser(previous => previous?._id === currentUser._id ? data.data : previous);
+      setNotice("Watchlist saved.");
     } catch (err) {
-      console.error("Watchlist update failed, rolling back:", err);
-      setCurrentUser(previousUser);
-      setError(
-        "Couldn't update your watchlist. Please check that the backend is running.",
-      );
+      setError(err.response?.data?.error || "Couldn't save your watchlist. Please try again.");
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleEnableAllNotifications = async () => {
-    if (!currentUser) return;
-    const allProductIds = INITIAL_CATALOG.map((product) => product.id);
+    if (saving) return;
+    setSaving(true);
+    setNotice("");
+    const allProductIds = catalog.products.map((product) => product.id);
 
     try {
       const response = await enableAllNotifications(
@@ -80,13 +59,15 @@ export const UserPanel = ({
         allProductIds,
       );
       if (response.data?.data) {
-        setCurrentUser(response.data.data);
+        setCurrentUser(previous => previous?._id === currentUser._id ? response.data.data : previous);
         setError("");
-        alert("All notification triggers are enabled.");
+        setNotice("In-app and email alerts are enabled for every product.");
       }
     } catch (err) {
       console.error("Failed to enable all notifications:", err);
       setError("Failed to enable all notification triggers.");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -96,23 +77,19 @@ export const UserPanel = ({
     setError("");
   };
 
-  // Logged-out state renders AuthPanel
-  if (!currentUser) {
-    return <AuthPanel setCurrentUser={setCurrentUser} />;
-  }
-
   // Logged-in UI
   return (
     <div className="space-y-8 animate-fadeIn">
+      <p role="status" className="sr-only">{saving ? "Saving preferences…" : notice}</p>
       {error && (
-        <div className="flex items-start bg-rose-50 border border-rose-200 text-rose-700 text-sm font-semibold px-4 py-3 rounded-xl">
+        <div role="alert" className="flex items-start bg-rose-50 border border-rose-200 text-rose-700 text-sm font-semibold px-4 py-3 rounded-xl">
           <AlertTriangle className="h-4 w-4 mr-2 mt-0.5 shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
       {/* User Header */}
-      <div className="bg-gradient-to-r from-slate-900 via-violet-950 to-slate-900 rounded-2xl p-6 text-white shadow-xl border border-slate-800 flex justify-between items-center">
+      <div className="bg-gradient-to-r from-slate-900 via-violet-950 to-slate-900 rounded-2xl p-6 text-white shadow-xl border border-slate-800 flex flex-wrap gap-3 justify-between items-center">
         <div className="flex items-center space-x-4">
           <span className="text-4xl bg-slate-800 p-3 rounded-2xl border border-slate-700">
             {currentUser.avatar || "👤"}
@@ -124,8 +101,8 @@ export const UserPanel = ({
                 Logged In
               </span>
             </div>
-            <h1 className="text-2xl font-extrabold mt-1">{currentUser.name}</h1>
-            <p className="text-slate-400 text-xs font-mono">
+            <h1 className="text-2xl font-extrabold mt-1 break-all">{currentUser.name}</h1>
+            <p className="text-slate-300 text-xs break-all">
               {currentUser.email}
             </p>
           </div>
@@ -150,25 +127,27 @@ export const UserPanel = ({
               My Personal Watchlist
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Toggling channels below updates your cloud preferences instantly.
+              Choose where to receive price-drop alerts.
             </p>
           </div>
 
           {currentUser.isAdmin && (
             <button
               type="button"
+              disabled={saving || !catalog.products.length}
               onClick={handleEnableAllNotifications}
               className="px-4 py-2 bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500 text-white text-xs font-black rounded-xl shadow-lg shadow-violet-500/30 flex items-center transition-all active:scale-95"
             >
               <Zap className="h-4 w-4 mr-1.5 animate-pulse text-yellow-300" />
-              ENABLE ALL ALERTS
+              Enable all alerts
             </button>
           )}
         </div>
 
         {/* Product list */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 p-6 bg-slate-50/30">
-          {INITIAL_CATALOG.map((product) => {
+          {!catalog.products.length && !catalog.error && <p role="status" className="text-sm text-slate-500">Loading products…</p>}
+          {catalog.products.map((product) => {
             const subscriptions = getSubStatus(product.id);
             const isSubscribed = subscriptions.inApp || subscriptions.email;
 
@@ -202,6 +181,7 @@ export const UserPanel = ({
                   </h3>
                   <div className="mt-2 text-xl font-black text-slate-900">
                     ${product.price}
+                    <span className="ml-2 text-xs font-medium text-slate-500">{product.inStock ? "In stock" : "Out of stock"}</span>
                   </div>
                 </div>
 
@@ -213,6 +193,9 @@ export const UserPanel = ({
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
+                      disabled={saving}
+                      aria-pressed={subscriptions.inApp}
+                      aria-label={`In-app alerts for ${product.name}`}
                       onClick={() => handleToggle(product.id, "inApp")}
                       className={`flex items-center justify-center px-3 py-2 rounded-xl border text-xs font-semibold transition-all active:scale-95 ${
                         subscriptions.inApp
@@ -225,6 +208,9 @@ export const UserPanel = ({
                     </button>
                     <button
                       type="button"
+                      disabled={saving}
+                      aria-pressed={subscriptions.email}
+                      aria-label={`Email alerts for ${product.name}`}
                       onClick={() => handleToggle(product.id, "email")}
                       className={`flex items-center justify-center px-3 py-2 rounded-xl border text-xs font-semibold transition-all active:scale-95 ${
                         subscriptions.email

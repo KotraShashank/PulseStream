@@ -1,25 +1,8 @@
 const { Server } = require("socket.io");
-const jwt = require("jsonwebtoken");
-const User = require("../models/User");
-const { isAdminEmail } = require("../middleware/auth");
+const { findSession, isAdminEmail } = require("../middleware/auth");
+const { isAllowedOrigin } = require("./origin");
 
 let io = null;
-
-function getAllowedOrigins() {
-  const configured = String(process.env.FRONTEND_URL || "http://localhost:5173")
-    .trim()
-    .replace(/\/+$/, "");
-  return [configured, "http://localhost:5173"].filter(Boolean);
-}
-
-function isAllowedOrigin(origin) {
-  if (!origin) return true;
-  if (getAllowedOrigins().includes(origin)) return true;
-  return (
-    process.env.NODE_ENV !== "production" &&
-    /^https?:\/\/localhost(?::\d+)?$/.test(origin)
-  );
-}
 
 const initializeSocket = (httpServer) => {
   io = new Server(httpServer, {
@@ -39,41 +22,24 @@ const initializeSocket = (httpServer) => {
     },
   });
 
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token;
-      if (!token) return next(new Error("Authentication required"));
-
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      socket.userId = String(decoded.id);
+      const session = token && await findSession(token);
+      if (!session) return next(new Error("Invalid or expired session"));
+      socket.data.session = session;
       next();
     } catch {
-      next(new Error("Invalid or expired token"));
+      next(new Error("Session check unavailable"));
     }
   });
 
-  io.on("connection", async (socket) => {
-    console.log(`🔌 Socket connected: ${socket.id}`);
-    const userId = String(socket.userId);
-
-    // Every authenticated user gets their own private room.
-    socket.join(userId);
-    console.log(`👤 Socket registered for user ${userId}`);
-
-    // Admin dashboards join a separate room for real-time metrics updates.
-    try {
-      const user = await User.findById(userId).select("email").lean();
-      if (user && isAdminEmail(user.email)) {
-        socket.join("admin-metrics");
-        console.log(`📊 Admin metrics socket registered for user ${userId}`);
-      }
-    } catch (error) {
-      console.warn("⚠️ Could not determine admin socket role:", error.message);
-    }
-
-    socket.on("disconnect", () => {
-      console.log(`❌ Socket disconnected: ${socket.id}`);
-    });
+  io.on("connection", (socket) => {
+    const session = socket.data.session;
+    socket.join(session.id);
+    if (isAdminEmail(session.email)) socket.join("admin-metrics");
+    const expiry = setTimeout(() => socket.disconnect(true), Math.max(0, session.expiresAt - Date.now()));
+    socket.once("disconnect", () => clearTimeout(expiry));
   });
 
   return io;
@@ -89,10 +55,14 @@ const getIO = () => {
  * The event intentionally contains no sensitive metric data.
  * The frontend responds by requesting the authoritative metrics from /api/analytics.
  */
+let metricsTimer;
 const emitMetricsUpdate = () => {
-  if (!io) return;
-  io.to("admin-metrics").emit("metrics:update");
-  console.log("📊 Socket.io: Emitted metrics:update to admin dashboards");
+  if (!io || metricsTimer) return;
+  metricsTimer = setTimeout(() => {
+    metricsTimer = null;
+    io.to("admin-metrics").emit("metrics:update");
+  }, 200);
+  metricsTimer.unref();
 };
 
 module.exports = {

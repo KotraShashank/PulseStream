@@ -1,47 +1,49 @@
 const nodemailer = require("nodemailer");
-const dotenv = require("dotenv");
-const path = require("path");
 
-dotenv.config({ path: path.resolve(__dirname, "../../.env") });
-
-const SMTP_PORT = Number(process.env.SMTP_PORT) || 465;
-const smtpConfigured = Boolean(process.env.SMTP_USER && process.env.SMTP_PASS);
-
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: SMTP_PORT,
-  secure: SMTP_PORT === 465,
-  auth: smtpConfigured
-    ? {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      }
-    : undefined,
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 15000,
-});
-
-if (!smtpConfigured) {
-  console.warn(
-    "⚠️ SMTP is not configured. In-app notifications will work, but email jobs will fail until SMTP_USER and SMTP_PASS are set.",
-  );
+function isMailConfigured() {
+  if (process.env.RESEND_API_KEY) return Boolean(process.env.EMAIL_FROM?.trim());
+  return Boolean(process.env.SMTP_USER && process.env.SMTP_PASS);
 }
 
-const sendEmail = async (to, subject, htmlContent) => {
-  if (!smtpConfigured) {
-    throw new Error("SMTP_USER and SMTP_PASS are required for email delivery");
+let smtpTransport;
+
+async function sendEmail(to, subject, html, idempotencyKey) {
+  if (!isMailConfigured()) throw new Error("Email delivery is not configured");
+
+  if (process.env.RESEND_API_KEY) {
+    const headers = {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    };
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ from: process.env.EMAIL_FROM.trim(), to: [to], subject, html }),
+      signal: AbortSignal.timeout(15000),
+      redirect: "error",
+    });
+    if (!response.ok) throw new Error(`Email provider rejected delivery (HTTP ${response.status})`);
+    const receipt = await response.json();
+    if (!receipt?.id) throw new Error("Email provider returned no message ID");
+    return true;
   }
 
-  const info = await transporter.sendMail({
-    from: `"PulseStream Alerts" <${process.env.SMTP_USER}>`,
-    to,
-    subject,
-    html: htmlContent,
+  const port = Number(process.env.SMTP_PORT) || 465;
+  smtpTransport ??= nodemailer.createTransport({
+    host: process.env.SMTP_HOST || "smtp.gmail.com",
+    port,
+    secure: port === 465,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
   });
-
-  console.log(`📧 Email sent to ${to} (${info.messageId})`);
+  await smtpTransport.sendMail({
+    from: `"PulseStream Alerts" <${process.env.SMTP_USER}>`,
+    to, subject, html,
+  });
   return true;
-};
+}
 
-module.exports = { sendEmail };
+module.exports = { isMailConfigured, sendEmail };

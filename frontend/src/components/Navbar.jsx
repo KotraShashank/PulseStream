@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Activity,
   Bell,
@@ -11,13 +11,29 @@ import {
 
 export const Navbar = ({
   isConnected,
-  notifications,
+  notifications = [],
   onClearNotifications,
   activeTab,
   setActiveTab,
   currentUser,
 }) => {
   const [showDrawer, setShowDrawer] = useState(false);
+
+  const drawer = useRef(null);
+  const bell = useRef(null);
+  useEffect(() => {
+    if (!showDrawer) return;
+    const outside = event => { if (!drawer.current?.contains(event.target)) setShowDrawer(false); };
+    const escape = event => {
+      if (event.key === "Escape") { setShowDrawer(false); bell.current?.focus(); }
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [showDrawer]);
 
   return (
     <nav className="bg-slate-950/95 backdrop-blur border-b border-white/5 text-white sticky top-0 z-50">
@@ -28,17 +44,15 @@ export const Navbar = ({
             <div className="bg-gradient-to-br from-violet-500 to-indigo-600 p-2 rounded-xl shadow-lg shadow-indigo-950/40">
               <Activity className="h-5 w-5 text-white" strokeWidth={2.5} />
             </div>
-            <div className="hidden sm:block">
+            <div className={currentUser ? "hidden sm:block" : ""}>
               <span className="font-extrabold text-lg tracking-tight text-white">
-                PulseStream<span className="text-violet-400">.io</span>
+                PulseStream
               </span>
-              <div className="text-[10px] text-slate-500 font-medium -mt-0.5">
-                MERN · BullMQ · WebSockets
-              </div>
+
             </div>
           </div>
 
-          {/* View Switcher Tabs */}
+          {currentUser && <>
           <div className="flex bg-white/[0.04] p-1 rounded-xl border border-white/5">
             <button
               onClick={() => setActiveTab("consumer")}
@@ -94,8 +108,11 @@ export const Navbar = ({
             </div>
 
             {/* Notification Bell Dropdown Button */}
-            <div className="relative">
+            <div ref={drawer} className="relative">
               <button
+                ref={bell}
+                aria-label="Recent alerts"
+                aria-expanded={showDrawer}
                 onClick={() => setShowDrawer(!showDrawer)}
                 className="relative p-2 bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white rounded-xl border border-white/10 transition-all active:scale-95"
               >
@@ -109,7 +126,7 @@ export const Navbar = ({
 
               {/* Notification Dropdown Drawer */}
               {showDrawer && (
-                <div className="absolute right-0 mt-3 w-80 sm:w-96 bg-slate-900 border border-white/10 rounded-2xl shadow-2xl shadow-black/50 z-50 overflow-hidden animate-slideIn">
+                <div className="absolute right-0 mt-3 w-[min(24rem,calc(100vw-2rem))] bg-slate-900 border border-white/10 rounded-2xl shadow-2xl shadow-black/50 z-50 overflow-hidden animate-slideIn">
                   <div className="p-4 bg-white/[0.03] border-b border-white/5 flex justify-between items-center">
                     <span className="font-bold text-sm text-white flex items-center">
                       <Bell className="h-4 w-4 mr-2 text-violet-400" /> Recent
@@ -131,12 +148,12 @@ export const Navbar = ({
                   <div className="max-h-80 overflow-y-auto p-2 space-y-1.5">
                     {notifications.length === 0 ? (
                       <div className="text-center py-10 text-slate-500 text-xs font-medium">
-                        No unread notifications yet.
+                        No alerts yet.
                       </div>
                     ) : (
-                      notifications.map((notif, idx) => (
+                      notifications.map((notif) => (
                         <div
-                          key={idx}
+                          key={notif._id}
                           className="p-3 bg-white/[0.03] hover:bg-white/[0.06] rounded-xl transition-colors border border-white/5"
                         >
                           <div className="flex justify-between items-start">
@@ -144,7 +161,7 @@ export const Navbar = ({
                               Instant Push
                             </span>
                             <span className="text-[10px] text-slate-500">
-                              Just now
+                              {new Date(notif.createdAt).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
                             </span>
                           </div>
                           <p className="font-semibold text-sm text-slate-200 mt-1">
@@ -166,6 +183,7 @@ export const Navbar = ({
               )}
             </div>
           </div>
+          </>}
         </div>
       </div>
     </nav>

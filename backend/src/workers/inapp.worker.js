@@ -1,4 +1,6 @@
 const { Worker } = require("bullmq");
+const { createHash } = require("node:crypto");
+const { Types } = require("mongoose");
 const { getRedisConnectionOptions } = require("../config/redis");
 const { Notification } = require("../models/Notification");
 const { Delivery } = require("../models/Delivery");
@@ -13,6 +15,7 @@ const inAppWorker = new Worker(
       `🔔 In-App Worker: Processing event ${eventId} for user ${userId}`,
     );
 
+    if (eventId && await Delivery.exists({ eventId, userId, channel: "inApp", status: "success" })) return;
     const user = await User.findById(userId);
 
     // Deleted/orphaned user
@@ -42,9 +45,12 @@ const inAppWorker = new Worker(
       const notification = await Notification.findOneAndUpdate(
         { userId, eventId },
         {
-          $setOnInsert: { userId, eventId, message, read: false },
+          $setOnInsert: {
+            _id: new Types.ObjectId(createHash("sha256").update(`${userId}:${eventId}`).digest("hex").slice(0, 24)),
+            userId, eventId, message, read: false,
+          },
         },
-        { upsert: true, returnDocument: true, setDefaultsOnInsert: true },
+        { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
       );
 
       try {
@@ -65,8 +71,7 @@ const inAppWorker = new Worker(
             status: "success",
             attempts: job.attemptsMade + 1,
             sentAt: new Date(),
-            errorMessage: undefined,
-            faultType: undefined,
+            $unset: { errorMessage: 1, faultType: 1 },
           },
         );
         emitMetricsUpdate();
@@ -78,7 +83,7 @@ const inAppWorker = new Worker(
         await Delivery.findOneAndUpdate(
           { eventId, userId, channel: "inApp" },
           {
-            status: "failed",
+            status: job.attemptsMade + 1 >= (job.opts.attempts || 1) ? "failed" : "pending",
             attempts: job.attemptsMade + 1,
             errorMessage: error.message,
             faultType: "INAPP_SAVE_ERROR",
@@ -93,6 +98,7 @@ const inAppWorker = new Worker(
   {
     connection: getRedisConnectionOptions("inapp-worker", { worker: true }),
     concurrency: 5,
+    autorun: false,
   },
 );
 

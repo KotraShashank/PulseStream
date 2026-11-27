@@ -8,7 +8,7 @@ const NotificationSchema = new Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
-NotificationSchema.index({ userId: 1 });
+NotificationSchema.index({ userId: 1, createdAt: -1 });
 
 // MongoDB automatically deletes notifications 30 days after they are created!
 NotificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 2592000 });

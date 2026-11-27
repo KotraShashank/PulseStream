@@ -10,16 +10,17 @@ const {
   getJWTSecret,
   isAdminEmail,
 } = require("../middleware/auth");
-const { sendEmail } = require("../config/mail");
+const { isMailConfigured, sendEmail } = require("../config/mail");
 
 const router = Router();
+const { limitAuth } = require("../middleware/auth-limit");
 
 // --------------------------------------------------
 // Validation helpers
 // --------------------------------------------------
 
 function normalizeEmail(value) {
-  return String(value || "")
+  return (typeof value === "string" ? value : "")
     .trim()
     .toLowerCase();
 }
@@ -27,11 +28,12 @@ function normalizeEmail(value) {
 function isValidEmail(email) {
   // Reasonable application-level email syntax validation.
   // It does not verify mailbox existence.
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
 function validatePassword(password) {
   const value = String(password || "");
+  if (Buffer.byteLength(value, "utf8") > 72) return "Password must be 72 bytes or fewer";
   if (value.length < 8) return "Password must be at least 8 characters long";
   if (!/[A-Z]/.test(value))
     return "Password must contain at least one uppercase letter";
@@ -48,6 +50,7 @@ function validatePassword(password) {
 function stripPassword(user) {
   const obj = user.toObject ? user.toObject() : user;
   delete obj.password;
+  delete obj.sessionVersion;
   delete obj.resetPasswordToken;
   delete obj.resetPasswordExpire;
   return obj;
@@ -75,11 +78,11 @@ async function attachSubscriptions(userObj) {
 // POST /api/auth/signup
 // ==================================================
 
-router.post("/signup", async (req, res) => {
+router.post("/signup", limitAuth(10), async (req, res) => {
   try {
     const nameValue = String(req.body.name || "").trim();
     const emailValue = normalizeEmail(req.body.email);
-    const passwordValue = String(req.body.password || "");
+    const passwordValue = (typeof req.body.password === "string" ? req.body.password : "");
 
     if (!nameValue || !emailValue || !passwordValue) {
       return res.status(400).json({
@@ -113,6 +116,10 @@ router.post("/signup", async (req, res) => {
       return res.status(400).json({ success: false, error: passwordError });
     }
 
+    if (isAdminEmail(emailValue)) {
+      return res.status(409).json({ success: false, error: "This address is reserved. Sign in or contact the administrator." });
+    }
+
     const existingUser = await User.findOne({ email: emailValue });
     if (existingUser) {
       return res
@@ -129,16 +136,17 @@ router.post("/signup", async (req, res) => {
       avatar: "👤",
     });
 
-    const token = jwt.sign({ id: user._id }, getJWTSecret(), {
+    const token = jwt.sign({ id: user._id, version: user.sessionVersion || 0 }, getJWTSecret(), {
       expiresIn: "7d",
     });
-    let safeUser = stripPassword(user);
+    const safeUser = stripPassword(user);
     safeUser.subscriptions = [];
     safeUser.isAdmin = isAdminEmail(safeUser.email);
 
     res.status(201).json({ success: true, token, user: safeUser });
   } catch (err) {
-    console.error("❌ Signup failed:", err);
+    if (err.code === 11000) return res.status(409).json({ success: false, error: "Email already registered" });
+    console.error("Signup failed:", err.name);
     res.status(500).json({ success: false, error: "Unable to create account" });
   }
 });
@@ -148,10 +156,10 @@ router.post("/signup", async (req, res) => {
 // POST /api/auth/login
 // ==================================================
 
-router.post("/login", async (req, res) => {
+router.post("/login", limitAuth(20), async (req, res) => {
   try {
     const emailValue = normalizeEmail(req.body.email);
-    const passwordValue = String(req.body.password || "");
+    const passwordValue = (typeof req.body.password === "string" ? req.body.password : "");
 
     if (!emailValue || !passwordValue) {
       return res
@@ -179,7 +187,7 @@ router.post("/login", async (req, res) => {
         .json({ success: false, error: "Invalid email or password" });
     }
 
-    const token = jwt.sign({ id: user._id }, getJWTSecret(), {
+    const token = jwt.sign({ id: user._id, version: user.sessionVersion || 0 }, getJWTSecret(), {
       expiresIn: "7d",
     });
     const safeUser = await attachSubscriptions(stripPassword(user));
@@ -207,7 +215,7 @@ router.get("/me", requireAuth, async (req, res) => {
     res.status(200).json({ success: true, user: safeUser });
   } catch (err) {
     console.error("❌ Failed to fetch current user:", err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: "Unable to complete the request" });
   }
 });
 
@@ -216,7 +224,7 @@ router.get("/me", requireAuth, async (req, res) => {
 // POST /api/auth/forgot-password
 // ==================================================
 
-router.post("/forgot-password", async (req, res) => {
+router.post("/forgot-password", limitAuth(4), async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
 
@@ -226,6 +234,9 @@ router.post("/forgot-password", async (req, res) => {
         .json({ success: false, error: "Please enter a valid email address" });
     }
 
+    if (!isMailConfigured()) {
+      return res.status(503).json({ success: false, error: "Email recovery is temporarily unavailable." });
+    }
     const user = await User.findOne({ email });
 
     // Prevent email enumeration.
@@ -257,25 +268,15 @@ router.post("/forgot-password", async (req, res) => {
       <p>Enter this code in the application to choose a new password. This code expires in 15 minutes.</p>
     `;
 
-    // Development mode check
-    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-      if (process.env.NODE_ENV === "production") {
-        throw new Error("SMTP is not configured");
-      }
-      console.warn(
-        `⚠️ SMTP is not configured. Development reset code for ${user.email}: ${resetToken}`,
-      );
-      return res.status(200).json({
-        success: true,
-        message: "SMTP is not configured; use the development reset code.",
-        devResetToken: resetToken,
+    try {
+      await sendEmail(user.email, "PulseStream: Password Reset", html);
+    } catch (mailError) {
+      await User.updateOne({ _id: user._id, resetPasswordToken: hashedToken }, {
+        $unset: { resetPasswordToken: 1, resetPasswordExpire: 1 },
       });
+      console.error("Recovery email delivery failed:", mailError.code || mailError.name);
     }
-
-    await sendEmail(user.email, "PulseStream: Password Reset", html);
-    res
-      .status(200)
-      .json({ success: true, message: "Reset code sent to email" });
+    res.status(200).json({ success: true, message: "If an account exists, a reset token was sent." });
   } catch (err) {
     console.error("❌ Forgot password failed:", err);
     res.status(500).json({ success: false, error: "Email could not be sent" });
@@ -287,10 +288,10 @@ router.post("/forgot-password", async (req, res) => {
 // POST /api/auth/reset-password
 // ==================================================
 
-router.post("/reset-password", async (req, res) => {
+router.post("/reset-password", limitAuth(12), async (req, res) => {
   try {
     const token = String(req.body.token || "").trim();
-    const newPassword = String(req.body.newPassword || "");
+    const newPassword = (typeof req.body.newPassword === "string" ? req.body.newPassword : "");
 
     if (!token) {
       return res
@@ -319,18 +320,25 @@ router.post("/reset-password", async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(newPassword, salt);
 
-    await User.findByIdAndUpdate(user._id, {
-      password: hashedPassword,
+    const changed = await User.updateOne({
+      _id: user._id, resetPasswordToken: hashedToken, resetPasswordExpire: { $gt: Date.now() },
+    }, {
+      $set: { password: hashedPassword },
+      $inc: { sessionVersion: 1 },
       $unset: { resetPasswordToken: 1, resetPasswordExpire: 1 },
     });
 
+    if (!changed.modifiedCount) {
+      return res.status(400).json({ success: false, error: "Invalid or expired reset token" });
+    }
+    require("../config/socket").getIO().in(String(user._id)).disconnectSockets(true);
     res.status(200).json({
       success: true,
       message: "Password updated successfully! You may now log in.",
     });
   } catch (err) {
     console.error("❌ Password reset failed:", err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: "Unable to complete the request" });
   }
 });
 
